@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pythonpod
+spec:
+  containers:
+  - name: python-container
+    #image: public.ecr.aws/ubuntu/ubuntu:24.04_stable
+    image: python:3.13.1
+    command: ["sh", "-c", "pip install flask requests_futures --disable-pip-version-check --root-user-action=ignore; while true; do sleep 100; done"]
+
+
+
+    

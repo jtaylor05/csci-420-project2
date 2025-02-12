@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: loadserver
+  labels:
+    app: loadserver
+    service: loadserver
+spec:
+  ports:
+  - port: 5555
+    name: http
+  selector:
+    app: loadserver
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loadserver
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: loadserver
+  template:
+    metadata:
+      labels:
+        app: loadserver
+    spec:
+      containers:
+        - name: test 
+          image: python:3.13.1
+          command: ["sh", "-c", "pip install Flask --disable-pip-version-check --root-user-action=ignore && python /scripts/script.py --real >> loadserver.txt"]
+          volumeMounts:
+            - name: python-script-volume
+              mountPath: /scripts
+          env:
+            - name: CONFIG
+              value: "passedconfig"
+          ports:
+          - containerPort: 5555
+      volumes:
+        - name: python-script-volume
+          configMap:
+            name: python-script
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: python-script
+data:
+  script.py: |
