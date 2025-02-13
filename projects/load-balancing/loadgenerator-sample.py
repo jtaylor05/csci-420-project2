@@ -13,18 +13,6 @@ import time
 
 from loadgeneratorbase import LoadGeneratorBase
 
-URLS = ["http://localhost:5555/getuserinfo",
-#        "http://localhost:5556/getuserinfo",
-#        "http://localhost:5557/getuserinfo",
-        ]
-
-# kubectl describe service loadserver will give a list of IPs
-#URLS = ["http://172.31.14.104:5555/getuserinfo",
-#        "http://172.31.95.131:5555/getuserinfo",
-#        "http://172.31.30.182:5555/getuserinfo",
-#        ]
-
-
 
 class LoadGeneratorSample(LoadGeneratorBase):
     # load balancing algorithm parameters: 
