@@ -43,7 +43,7 @@ class LoadGeneratorBase(ABC):
         parser = argparse.ArgumentParser(add_help=True)
         # test case parameters
         parser.add_argument("--users", type=int, default=100)
-        parser.add_argument("--parallelUsers", type=int, default=5)
+        parser.add_argument("--parallelUsers", type=int, default=100)
 
         # standard local server config
         parser.add_argument("--localservers", help="n where running n servers on ports 5555, 5556, ...",

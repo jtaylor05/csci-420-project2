@@ -13,9 +13,6 @@ import time
 app = Flask(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
-# scaling factor for cost of concurrent work
-CONCURRENT_LOAD_FACTOR = 4
-
 args = None
 
 # lock used to simulate running on a CPU
@@ -45,7 +42,7 @@ def compute():
     current_work = 0
     with parallellock:
         current_work = parallel
-        if current_work >= args.maxwork:
+        if current_work >= args.maxload:
             # server cost of overload is high
             with worklock:
                 logging.log
@@ -56,7 +53,7 @@ def compute():
 
     try:    # make sure load is decremented 
         if not args.real:
-            work = int(args.basework + ( CONCURRENT_LOAD_FACTOR * current_work)^2) # ms ticks
+            work = int(args.basework + ( args.loadfactor * current_work)) # ms ticks
             # get work of lock time, in 1ms increments
             for i in range(work):
                 with worklock:
@@ -81,9 +78,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--real", action="store_true")
-    parser.add_argument("--basework", type=int, default=10)
-    parser.add_argument("--overloadCostS", type=int, default=0.10)
-    parser.add_argument("--maxwork", type=int, default=10)
+    parser.add_argument("--loadfactor", help="additional cost as more work in parallel", type=float, default=0)
+    parser.add_argument("--basework", help="work in ms per request", type=int, default=10)
+    parser.add_argument("--overloadCostS", help="time in S wasted when server is overloaded", type=float, default=0.10)
+    parser.add_argument("--maxload", help="maximum number of requests before overload", type=int, default=10)
     args = parser.parse_args()
     realwork = args.real
     app.config['PORT'] = args.port
