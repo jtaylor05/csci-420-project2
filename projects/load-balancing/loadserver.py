@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # needs pip install flask
 import argparse
 from flask import Flask, request
