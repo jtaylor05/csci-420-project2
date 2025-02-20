@@ -15,7 +15,7 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 args = None
 
 # lock used to simulate running on a CPU
-worklock = threading.Lock()
+worklock = None # Semaphore(args.maxload)
 
 # flag to indicate doing real work
 WORK_ROUNDS=150000
@@ -77,11 +77,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--real", action="store_true")
-    parser.add_argument("--loadfactor", help="additional cost as more work in parallel", type=float, default=0)
-    parser.add_argument("--basework", help="work in ms per request", type=int, default=10)
+    parser.add_argument("--loadfactor", help="additional cost as more work in parallel", type=float, default=2)
+    parser.add_argument("--basework", help="work in ms per request", type=int, default=20)
     parser.add_argument("--overloadCostS", help="time in S wasted when server is overloaded", type=float, default=0.10)
     parser.add_argument("--maxload", help="maximum number of requests before overload", type=int, default=10)
     args = parser.parse_args()
     realwork = args.real
+    worklock = threading.Semaphore(args.maxload)
+    print (f"loadserver with {vars(args)}")
     app.config['PORT'] = args.port
     app.run(host='0.0.0.0', threaded=True, port=args.port)
