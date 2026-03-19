@@ -1,5 +1,16 @@
-const mysql = require("mysql2");
-const dbConfig = require("../config/config");
+const { ListTablesCommand, DynamoDBClient, PutItemCommand,
+        GetItemCommand, ScanCommand, UpdateItemCommand,
+        DeleteItemCommand } = require("@aws-sdk/client-dynamodb");
+const { marshall, unmarshall } = require("@aws-sdk/util-dynamodb");
+const { v4: uuidv4 } = require('uuid');
+
+// comment out the old db config
+// const dbConfig = require("../config/config");
+
+const client = new DynamoDBClient({ region: "us-east-1" });
+const TABLE_NAME = process.env.DYNAMODB_TABLE || "STUDENTS";; // match whatever you named your table
+
+//const dbConfig = require("../config/config");
 // constructor
 const Supplier = function (supplier) {
     this.id = supplier.id;
@@ -12,115 +23,135 @@ const Supplier = function (supplier) {
 };
 // connecting on each request so the server will start without a db connection, plus
 //   a simple mechanism enabling the app to recover from a momentary missing db connection
-Supplier.dbConnect = () => {
-    const connection = mysql.createConnection({
-        host: dbConfig.APP_DB_HOST,
-        user: dbConfig.APP_DB_USER,
-        password: dbConfig.APP_DB_PASSWORD,
-        database: dbConfig.APP_DB_NAME
-    });
-    connection.connect(error => {
-        if (error) {
-            console.log("Error connecting to Db")
-            throw error;
-        }
-        console.log("Successfully connected to the database.");
-    });
-    return connection;
-}
+// Supplier.dbConnect = () => {
+//     const connection = mysql.createConnection({
+//         host: dbConfig.APP_DB_HOST,
+//         user: dbConfig.APP_DB_USER,
+//         password: dbConfig.APP_DB_PASSWORD,
+//         database: dbConfig.APP_DB_NAME
+//     });
+//     connection.connect(error => {
+//         if (error) {
+//             console.log("Error connecting to Db")
+//             throw error;
+//         }
+//         console.log("Successfully connected to the database.");
+//     });
+//     return connection;
+// }
 
-Supplier.create = (newSupplier, result) => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query("INSERT INTO students SET ?", newSupplier, (err, res) => {
-        if (err) {
-            console.log("error: ", err);
-            result(err, null);
-            return;
-        }
-        console.log("created supplier: ", {id: res.insertId, ...newSupplier});
-        result(null, {id: res.insertId, ...newSupplier});
-    });
+Supplier.create = (newStudent, result) => {
+  (async () => {
+    try {
+      const item = { ...newStudent, id: uuidv4() };
+      await client.send(new PutItemCommand({
+        TableName: TABLE_NAME,
+        Item: marshall(item, { removeUndefinedValues: true, convertClassInstanceToMap: true })
+      }));
+      result(null, item);
+    } catch (e) {
+      result(e, null);
+    }
+  })();
 };
 
-Supplier.getAll = result => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query("SELECT * FROM students", (err, res) => {
-        if (err) {
-            console.log("error: ", err);
-            result(err, null);
-            return;
-        }
-        console.log("Students: ", res);
-        result(null, res);
-    });
+Supplier.getAll = (result) => {
+  (async () => {
+    try {
+      const data = await client.send(new ScanCommand({ TableName: TABLE_NAME }));
+      
+      // If no items exist, return an empty array rather than throwing
+      if (!data.Items || data.Items.length === 0) {
+        result(null, []);
+        return;
+      }
+
+      const students = data.Items.map((item) => unmarshall(item));
+      result(null, students);
+    } catch (e) {
+      result(e, null);
+    }
+  })();
 };
 
-Supplier.findById = (supplierId, result) => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query(`SELECT * FROM students WHERE id = ${supplierId}`, (err, res) => {
-        if (err) {
-            console.log("error: ", err);
-            result(err, null);
-            return;
-        }
-        if (res.length) {
-            console.log("found supplier: ", res[0]);
-            result(null, res[0]);
-            return;
-        }
-        result({kind: "not_found"}, null);
-    });
+Supplier.findById = (id, result) => {
+  (async () => {
+    try {
+      const data = await client.send(new GetItemCommand({
+        TableName: TABLE_NAME,
+        Key: marshall({ id })
+      }));
+      if (!data.Item) {
+        result({ kind: "not_found" }, null);
+        return;
+      }
+      result(null, unmarshall(data.Item));
+    } catch (e) {
+      result(e, null);
+    }
+  })();
 };
 
-Supplier.updateById = (id, supplier, result) => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query(
-        "UPDATE students SET name = ?, city = ?, address = ?, email = ?, phone = ?, state = ? WHERE id = ?",
-        [supplier.name, supplier.city, supplier.address, supplier.email, supplier.phone, supplier.state, id],
-        (err, res) => {
-            if (err) {
-                console.log("error: ", err);
-                result(err, null);
-                return;
-            }
-            if (res.affectedRows === 0) {
-                result({kind: "not_found"}, null);
-                return;
-            }
-            console.log("updated supplier: ", {id: id, ...supplier});
-            result(null, {id: id, ...supplier});
-        }
-    );
+Supplier.updateById = (id, student, result) => {
+  (async () => {
+    try {
+      await client.send(new PutItemCommand({
+        TableName: TABLE_NAME,
+        Item: marshall({ ...student, id }, { removeUndefinedValues: true, convertClassInstanceToMap: true })
+      }));
+      result(null, { id, ...student });
+    } catch (e) {
+      result(e, null);
+    }
+  })();
 };
 
-Supplier.delete = (id, result) => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query("DELETE FROM students WHERE id = ?", id, (err, res) => {
-        if (err) {
-            console.log("error: ", err);
-            result(err, null);
-            return;
-        }
-        if (res.affectedRows === 0) {
-            result({kind: "not_found"}, null);
-            return;
-        }
-        console.log("deleted student with id: ", id);
-        result(null, res);
-    });
+Supplier.remove = (id, result) => {
+  (async () => {
+    try {
+      await client.send(new DeleteItemCommand({
+        TableName: TABLE_NAME,
+        Key: marshall({ id })
+      }));
+      result(null, { id });
+    } catch (e) {
+      result(e, null);
+    }
+  })();
 };
 
-Supplier.removeAll = result => {
-    const dbConn = Supplier.dbConnect();
-    dbConn.query("DELETE FROM students", (err, res) => {
-        if (err) {
-            console.log("error: ", err);
-            result(err, null);
-            return;
-        }
-        console.log(`deleted ${res.affectedRows} students`);
-        result(null, res);
-    });
+Supplier.removeAll = (result) => {
+  (async () => {
+    try {
+      // DynamoDB has no "DELETE FROM table" equivalent, so we
+      // scan for all items first, then delete each one by its key
+      const scanData = await client.send(new ScanCommand({ TableName: TABLE_NAME }));
+
+      if (!scanData.Items || scanData.Items.length === 0) {
+        console.log("No students to delete");
+        result(null, { deleted: 0 });
+        return;
+      }
+
+      // Delete each item individually using its id
+      const deletePromises = scanData.Items.map((item) => {
+        const { id } = unmarshall(item);
+        return client.send(new DeleteItemCommand({
+          TableName: TABLE_NAME,
+          Key: marshall({ id })
+        }));
+      });
+
+      await Promise.all(deletePromises);
+
+      console.log(`deleted ${scanData.Items.length} students`);
+      result(null, { deleted: scanData.Items.length });
+
+    } catch (e) {
+      console.log("error: ", e);
+      result(e, null);
+    }
+  })();
 };
 
 module.exports = Supplier;

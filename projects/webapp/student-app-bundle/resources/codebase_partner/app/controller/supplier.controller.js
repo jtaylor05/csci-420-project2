@@ -39,7 +39,8 @@ exports.create = [
 exports.findAll = (req, res) => {
     Supplier.getAll((err, data) => {
         if (err)
-            res.render("500", {message: "The was a problem retrieving the list of students"});
+            // Write out error to webpage
+            res.render("500", {message: err});//"The was a problem retrieving the list of students"});
         else res.render("supplier-list-all", {students: data});
     });
 };
@@ -103,7 +104,7 @@ exports.update = [
 ];
 
 exports.remove = (req, res) => {
-    Supplier.delete(req.params.id, (err, data) => {
+    Supplier.remove(req.params.id, (err, data) => {
         if (err) {
             if (err.kind === "not_found") {
                 res.status(404).send({
