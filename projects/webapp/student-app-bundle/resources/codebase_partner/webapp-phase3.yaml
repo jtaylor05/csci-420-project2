@@ -1,0 +1,410 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'WebApp Project Phase 3 - High availability and scalability with ALB and Auto Scaling'
+
+Parameters:
+  LatestUbuntuAMI:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id'
+    Description: 'Latest Ubuntu 22.04 LTS AMI from SSM Parameter Store'
+
+  DBPassword:
+    Type: String
+    Default: 'wmcc26db'
+    NoEcho: true
+    Description: 'Password for the RDS database master user'
+
+  WebAppAMIId:
+    Type: String
+    Description: 'AMI ID of WebAppAMI - create this manually from the WebAppAppServer instance before deploying Phase 3'
+
+Resources:
+
+  # -------------------------------------------------------
+  # VPC and Networking
+  # -------------------------------------------------------
+
+  WebAppVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: WebAppVPC
+
+  WebAppIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: WebAppIGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref WebAppVPC
+      InternetGatewayId: !Ref WebAppIGW
+
+  # Public Subnet 1 (AZ 1)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public Subnet 1
+
+  # Public Subnet 2 (AZ 2) - NEW for Phase 3, required for ALB multi-AZ
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public Subnet 2
+
+  # Private Subnet 1 (AZ 1) - for RDS
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private Subnet 1
+
+  # Private Subnet 2 (AZ 2) - for RDS subnet group
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private Subnet 2
+
+  # Public route table - shared by both public subnets
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WebAppVPC
+      Tags:
+        - Key: Name
+          Value: WebApp Public Route Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref WebAppIGW
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # Associate Public Subnet 2 with the public route table
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private route table (local only - no internet gateway)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WebAppVPC
+      Tags:
+        - Key: Name
+          Value: WebAppPrivateRT
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # -------------------------------------------------------
+  # Security Groups
+  # -------------------------------------------------------
+
+  # Security group for the web application servers and ALB
+  WebAppAPPSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebAppAPPSG
+      GroupDescription: Security group for web application server and ALB
+      VpcId: !Ref WebAppVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH access
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP access for web browser and ALB
+      Tags:
+        - Key: Name
+          Value: WebAppAPPSG
+
+  # Security group for the RDS database
+  WebAppDBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebAppDBSG
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref WebAppVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/16
+          Description: MySQL access from within VPC
+      Tags:
+        - Key: Name
+          Value: WebAppDBSG
+
+  # -------------------------------------------------------
+  # RDS MySQL Database
+  # -------------------------------------------------------
+
+  WebAppDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for WebApp RDS database
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: WebAppDBSubnetGroup
+
+  WebAppDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: WebAppDB
+      DBInstanceClass: db.t3.micro
+      Engine: MySQL
+      MasterUsername: nodeapp
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: '20'
+      DBName: STUDENTS
+      VPCSecurityGroups:
+        - !Ref WebAppDBSG
+      DBSubnetGroupName: !Ref WebAppDBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      EnableCloudwatchLogsExports: []
+      Tags:
+        - Key: Name
+          Value: WebAppDB
+
+  # -------------------------------------------------------
+  # Secrets Manager
+  # -------------------------------------------------------
+
+  MyDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: Mydbsecret
+      Description: Database secret for web app
+      SecretString: !Sub |
+        {"user":"nodeapp","password":"${DBPassword}","host":"${WebAppDB.Endpoint.Address}","db":"STUDENTS"}
+
+  # -------------------------------------------------------
+  # Application Load Balancer
+  # -------------------------------------------------------
+
+  # Target group - ALB forwards traffic to instances registered here
+  WebAppTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: WebAppTG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref WebAppVPC
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: WebAppTG
+
+  WebAppALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: AttachGateway
+    Properties:
+      Name: WebAppALB
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref WebAppAPPSG
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: WebAppALB
+
+  # Listener - forwards HTTP traffic on port 80 to the target group
+  WebAppALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebAppALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTG
+
+  # -------------------------------------------------------
+  # Auto Scaling - Launch Template and Auto Scaling Group
+  # -------------------------------------------------------
+
+  # Launch template uses the manually created WebAppAMI
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: WebAppTemplate
+      LaunchTemplateData:
+        ImageId: !Ref WebAppAMIId
+        InstanceType: t3.micro
+        KeyName: vockey
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        SecurityGroupIds:
+          - !Ref WebAppAPPSG
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: Auto Scaling Instance
+
+  WebAppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - WebAppALBListener
+      - WebAppDB
+      - MyDBSecret
+    Properties:
+      AutoScalingGroupName: WebAppAutoScalingGroup
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+        Version: !GetAtt WebAppLaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '4'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      TargetGroupARNs:
+        - !Ref WebAppTG
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: Auto Scaling Instance
+          PropagateAtLaunch: true
+
+  # Target tracking scaling policy - scales out when average CPU exceeds 30%
+  WebAppScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebAppAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 30.0
+
+# -------------------------------------------------------
+# Outputs
+# -------------------------------------------------------
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref WebAppVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet1-ID'
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+
+  ALBDNSName:
+    Description: DNS name of the Application Load Balancer - use this to access the app
+    Value: !GetAtt WebAppALB.DNSName
+
+  WebAppURL:
+    Description: URL to access the web application via the load balancer
+    Value: !Sub 'http://${WebAppALB.DNSName}'
+
+  RDSEndpoint:
+    Description: RDS database endpoint
+    Value: !GetAtt WebAppDB.Endpoint.Address
+
+  SecretARN:
+    Description: ARN of the Secrets Manager secret
+    Value: !Ref MyDBSecret
+
+  AppServerSGId:
+    Description: Security Group ID for WebAppAPPSG
+    Value: !Ref WebAppAPPSG
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroup-ID'
+
+  DBSGId:
+    Description: Security Group ID for WebAppDBSG
+    Value: !Ref WebAppDBSG
+
+  AutoScalingGroupName:
+    Description: Name of the Auto Scaling Group
+    Value: !Ref WebAppAutoScalingGroup
+
+  TargetGroupARN:
+    Description: ARN of the ALB Target Group
+    Value: !Ref WebAppTG

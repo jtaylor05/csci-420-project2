@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'WebApp Project Phase 2 - Decoupled architecture with RDS, Secrets Manager, and separate web server'
+
+Parameters:
+  LatestUbuntuAMI:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id'
+    Description: 'Latest Ubuntu 22.04 LTS AMI from SSM Parameter Store'
+
+  DBPassword:
+    Type: String
+    Default: 'wmcc26db'
+    NoEcho: true
+    Description: 'Password for the RDS database master user'
+
+Resources:
+
+  # -------------------------------------------------------
+  # VPC and Networking
+  # -------------------------------------------------------
+
+  WebAppVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: WebAppVPC
+
+  WebAppIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: WebAppIGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref WebAppVPC
+      InternetGatewayId: !Ref WebAppIGW
+
+  # Public Subnet 1 (AZ 1) - hosts the web app server
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public Subnet 1
+
+  # Private Subnet 1 (AZ 1) - for RDS
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private Subnet 1
+
+  # Private Subnet 2 (AZ 2) - required for RDS subnet group (multi-AZ)
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WebAppVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private Subnet 2
+
+  # Public route table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WebAppVPC
+      Tags:
+        - Key: Name
+          Value: WebApp Public Route Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref WebAppIGW
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private route table (local only - no internet gateway)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WebAppVPC
+      Tags:
+        - Key: Name
+          Value: WebAppPrivateRT
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # -------------------------------------------------------
+  # Security Groups
+  # -------------------------------------------------------
+
+  # Security group for the web application server
+  WebAppAPPSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebAppAPPSG
+      GroupDescription: Security group for web application server
+      VpcId: !Ref WebAppVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH access
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP access for web browser
+      Tags:
+        - Key: Name
+          Value: WebAppAPPSG
+
+  # Security group for the RDS database (MySQL access from within VPC only)
+  WebAppDBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebAppDBSG
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref WebAppVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 10.0.0.0/16
+          Description: MySQL access from within VPC
+      Tags:
+        - Key: Name
+          Value: WebAppDBSG
+
+  # -------------------------------------------------------
+  # RDS MySQL Database
+  # -------------------------------------------------------
+
+  # Subnet group required by RDS (needs at least 2 AZs)
+  WebAppDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for WebApp RDS database
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: WebAppDBSubnetGroup
+
+  WebAppDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: WebAppDB
+      DBInstanceClass: db.t3.micro
+      Engine: MySQL
+      MasterUsername: nodeapp
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: '20'
+      DBName: STUDENTS
+      VPCSecurityGroups:
+        - !Ref WebAppDBSG
+      DBSubnetGroupName: !Ref WebAppDBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      EnableCloudwatchLogsExports: []
+      Tags:
+        - Key: Name
+          Value: WebAppDB
+
+  # -------------------------------------------------------
+  # Secrets Manager - stores DB credentials for the app
+  # -------------------------------------------------------
+
+  MyDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: Mydbsecret
+      Description: Database secret for web app
+      SecretString: !Sub |
+        {"user":"nodeapp","password":"${DBPassword}","host":"${WebAppDB.Endpoint.Address}","db":"STUDENTS"}
+
+  # -------------------------------------------------------
+  # Web Application Server (EC2)
+  # -------------------------------------------------------
+
+  WebAppAppServer:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - AttachGateway
+      - WebAppDB
+      - MyDBSecret
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref LatestUbuntuAMI
+      KeyName: vockey
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref WebAppAPPSG
+          SubnetId: !Ref PublicSubnet1
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -xe
+          apt update -y
+          apt install nodejs unzip wget npm mysql-client -y
+          wget https://aws-tc-largeobjects.s3.us-west-2.amazonaws.com/CUR-TF-200-ACCAP1-1-91571/1-lab-capstone-project-1/code.zip -P /home/ubuntu
+          cd /home/ubuntu
+          unzip code.zip -x "resources/codebase_partner/node_modules/*"
+          cd resources/codebase_partner
+          npm install aws aws-sdk mysql
+          export APP_PORT=80
+          npm start &
+          echo '#!/bin/bash -xe
+          cd /home/ubuntu/resources/codebase_partner
+          export APP_PORT=80
+          npm start' > /etc/rc.local
+          chmod +x /etc/rc.local
+      Tags:
+        - Key: Name
+          Value: WebAppAppServer
+
+# -------------------------------------------------------
+# Outputs
+# -------------------------------------------------------
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref WebAppVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet1-ID'
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+
+  WebAppAppServerInstanceId:
+    Description: EC2 Instance ID for WebAppAppServer
+    Value: !Ref WebAppAppServer
+
+  WebAppAppServerPublicIP:
+    Description: Public IP address of WebAppAppServer
+    Value: !GetAtt WebAppAppServer.PublicIp
+
+  WebAppURL:
+    Description: URL to access the web application
+    Value: !Sub 'http://${WebAppAppServer.PublicDnsName}'
+
+  RDSEndpoint:
+    Description: RDS database endpoint
+    Value: !GetAtt WebAppDB.Endpoint.Address
+
+  SecretARN:
+    Description: ARN of the Secrets Manager secret
+    Value: !Ref MyDBSecret
+
+  AppServerSGId:
+    Description: Security Group ID for WebAppAPPSG
+    Value: !Ref WebAppAPPSG
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroup-ID'
+
+  DBSGId:
+    Description: Security Group ID for WebAppDBSG
+    Value: !Ref WebAppDBSG
